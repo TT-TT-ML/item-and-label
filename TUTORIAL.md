@@ -1,6 +1,6 @@
 # ItemAndLabel 完整教程
 
-自制跨平台「标签-值」特殊数据库工具。纯 C++17 单文件，Windows / Android / Linux / macOS / iOS 可移植。
+自制跨平台「标签-值」特殊数据库工具。纯 C++17 单文件，Windows / Android / Linux / macOS / iOS 可移植。MIT 许可。
 
 ## 概念
 
@@ -13,13 +13,13 @@
 ### 1. 新建项
 
 ```
-db.exe "x.mdb" --new_item --label_add "-name" -v --char "xiaoming" --main_label "-name"
+db.exe "x.ildb" --new_item --label_add "-name" -v --char "xiaoming" --main_label "-name"
 ```
 
 必须指定 `--main_label`。批量创建加 `--cnt N`：
 
 ```
-db.exe "x.mdb" --new_item --label_add "-name" -v --char "user*" --main_label "-name" --cnt 50
+db.exe "x.ildb" --new_item --label_add "-name" -v --char "user*" --main_label "-name" --cnt 50
 ```
 
 每项独立生成不重复的 10 位字母数字 id。
@@ -45,10 +45,10 @@ db.exe "x.mdb" --new_item --label_add "-name" -v --char "user*" --main_label "-n
 ### 3. 给已有项加标签 / 删标签
 
 ```
-db.exe "x.mdb" --label_add "-age" -v --int "0" "*"            # 全部项加 age=0
-db.exe "x.mdb" --label_add "-age" -v --int "*" "*"            # 全部项加 age=1,2,3...
-db.exe "x.mdb" --label_add "-tag" -v --char "a" "-name" "-age"  # 给同时含 name 和 age 的项加 tag
-db.exe "x.mdb" --label_del "-age" "*"                         # 全部项删除 age
+db.exe "x.ildb" --label_add "-age" -v --int "0" "*"            # 全部项加 age=0
+db.exe "x.ildb" --label_add "-age" -v --int "*" "*"            # 全部项加 age=1,2,3...
+db.exe "x.ildb" --label_add "-tag" -v --char "a" "-name" "-age"  # 给同时含 name 和 age 的项加 tag
+db.exe "x.ildb" --label_del "-age" "*"                         # 全部项删除 age
 ```
 
 过滤标签可多个（同时满足），`*` 表示全部。
@@ -56,7 +56,7 @@ db.exe "x.mdb" --label_del "-age" "*"                         # 全部项删除 
 ### 4. 搜索
 
 ```
-db.exe "x.mdb" --search "age>=18" --and "name=user*" --or "active=true"
+db.exe "x.ildb" --search "age>=18" --and "name=user*" --or "active=true"
 ```
 
 从左到右按 `--and` / `--or` 结合。条件支持：标签名（存在性）、`标签=值`、`标签>=值`、`!=`、`>`、`<`、`<=`，值支持 `* ?` 通配。
@@ -64,24 +64,24 @@ db.exe "x.mdb" --search "age>=18" --and "name=user*" --or "active=true"
 按任意标签的值搜索：
 
 ```
-db.exe "x.mdb" --search -v "xiaoming"
+db.exe "x.ildb" --search -v "xiaoming"
 ```
 
 ### 5. 查看与取值
 
 ```
-db.exe "x.mdb" --list
-db.exe "x.mdb" --count
-db.exe "x.mdb" --show <id>
-db.exe "x.mdb" -g "name"   # 输出所有 name 标签的值, 每行一个(纯文本)
+db.exe "x.ildb" --list
+db.exe "x.ildb" --count
+db.exe "x.ildb" --show <id>
+db.exe "x.ildb" -g "name"   # 输出所有 name 标签的值, 每行一个(纯文本)
 ```
 
 ### 6. 删除项 / 修改
 
 ```
-db.exe "x.mdb" --delete "*"            # 删除全部(需确认)
-db.exe "x.mdb" --delete "-name"        # 删除所有含 name 标签的项
-db.exe "x.mdb" --delete "a" "b"       # 删除同时含 a 和 b 的项
+db.exe "x.ildb" --delete "*"            # 删除全部(需确认)
+db.exe "x.ildb" --delete "-name"        # 删除所有含 name 标签的项
+db.exe "x.ildb" --delete "a" "b"       # 删除同时含 a 和 b 的项
 ```
 
 > 过滤里 `*` 只作为恒真项，不会短路其余条件——例如 `--delete a *` 仍只删除含 `a` 的项，不会误删全部。
@@ -89,10 +89,12 @@ db.exe "x.mdb" --delete "a" "b"       # 删除同时含 a 和 b 的项
 修改单项：
 
 ```
-db.exe "x.mdb" --set <id> "-age" -v --int "30"
+db.exe "x.ildb" --set <id> "-age" -v --int "30"
 ```
 
 ## 企业级存储
+
+> 定位：**单用户工具**。无文件锁，避免多个进程同时写同一个库（读-改-写非并发安全），否则可能互相覆盖。
 
 - **v2 紧凑二进制（`ILDB` 魔数）**：标签名字典去重 + 数值二进制化，实测 19.4KB → 5.5KB（-71%）。
 - **原子写入**：先写临时文件、`fsync` 落盘后再整体原子替换（Windows `MoveFileEx`，POSIX `rename`），进程中断 / 断电不损坏。
@@ -100,16 +102,16 @@ db.exe "x.mdb" --set <id> "-age" -v --int "30"
 - **向后兼容**：自动读 v1 文本旧库，`--vacuum` 一键升级。
 
 ```
-db.exe "x.mdb" --stats     # 大小 / 项数 / 标签去重
-db.exe "x.mdb" --vacuum    # 压缩重写为紧凑格式
-db.exe "x.mdb" --check     # 完整性校验
-db.exe "x.mdb" --backup "backup.mdb"
+db.exe "x.ildb" --stats     # 大小 / 项数 / 标签去重
+db.exe "x.ildb" --vacuum    # 压缩重写为紧凑格式
+db.exe "x.ildb" --check     # 完整性校验
+db.exe "x.ildb" --backup "backup.ildb"
 ```
 
 ## 多平台
 
 - Windows：`db.exe`（x64）、`db32.exe`（x86）、`db-arm64.exe`（ARM64）
-- Android：`db-android-arm64` / `arm32` / `x86_64` / `x86` / `riscv64`（NDK 交叉编译，ELF 可 push 执行）
+- Android：`db-android-arm64` / `arm32` / `x86_64` / `x86` / `riscv64`（NDK 交叉编译，**静态链接 libc++、已 strip**，ELF 可直接 push 执行）
 - APK：安卓图形界面版（内置 native，输入框敲命令 → 运行 → 显示输出）
 - Linux / macOS：源码 `g++` / `clang++` 一条命令编译；iOS 需 macOS + Xcode，仅越狱设备可运行
 
