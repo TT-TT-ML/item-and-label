@@ -14,7 +14,9 @@
 //   db.exe <数据库文件.mdb> --search "-name" --and "age>=18" --or "active=true"
 //   db.exe <数据库文件.mdb> --list / --count / --show <id> / --delete <标签...|*> / --set <id> <标签> -v <类型> <值>
 //
-// 存储格式: ItemAndLabel DB v1 文本 / v2 紧凑二进制(ILDB 魔数)。
+// 存储格式(每项一行, 值统一双引号包裹, 引号内反斜杠转义):
+//   ItemAndLabel DB v1
+//   -id <10位id> -main_label:<主标签名>:<类型>:"<主标签值>" -<标签名>:<类型>:"<值>" ...
 // 类型: char / int / float / bool。标签名仅支持数字、英文、'_'。'*' 为通配。
 
 #include <iostream>
@@ -34,6 +36,9 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 using namespace std;
 
@@ -62,8 +67,6 @@ static LType tparse(string s) {
 struct Label { LType type = LType::CHAR; string value; };
 struct Item  { string id; string mainLabel; map<string, Label> labels; };
 
-static string esc(const string& s) { string r; for (char c : s) { if (c == '"' || c == '\\') r += '\\'; r += c; } return r; }
-static string quote(const string& s) { return "\"" + esc(s) + "\""; }
 
 static bool validName(const string& s) {
     if (s.empty()) return false;
@@ -79,6 +82,7 @@ static bool validCharValue(const string& ty, const string& va) {
         cerr << "错误: char 类型值不能包含符号 % & # \\ / (当前值: \"" << va << "\")\n";
         return false;
     }
+    // '@' 只能以枚举遍历 @(...) 形式出现, 单独 '@' 不允许
     size_t a = va.find('@');
     if (a != string::npos && (a + 1 >= va.size() || va[a + 1] != '(')) {
         cerr << "错误: char 类型值中的 @ 需配合括号遍历 @(...) (当前值: \"" << va << "\")\n";
@@ -87,6 +91,7 @@ static bool validCharValue(const string& ty, const string& va) {
     return true;
 }
 
+// 解析 [+-]digits[.digits], 成功返回 true 并把 i 推进到数字末尾
 static bool parseNum(const string& s, size_t& i, double& out) {
     size_t j = i;
     if (j < s.size() && (s[j] == '+' || s[j] == '-')) j++;
@@ -99,6 +104,7 @@ static bool parseNum(const string& s, size_t& i, double& out) {
     return true;
 }
 
+// 格式化序号: int 取整(可补零); float/char 整数显示整数, 小数用 %.10g
 static string fmtNum(double v, LType ty, int width) {
     char buf[64];
     double vi = floor(v + 0.5);
@@ -114,11 +120,12 @@ static string fmtNum(double v, LType ty, int width) {
     return buf;
 }
 
-// 批量值通配符展开(值模板可含多个占位符), idx 从 1 开始。
+// 批量值通配符展开(值模板可含多个占位符), idx 从 1 开始。返回 true 表示模板含通配符并已展开。
 static bool wildValue(const string& va, LType ty, long long idx, string& out, string& err) {
     err.clear();
     string s = va;
     bool any = false;
+    // 1) 枚举遍历 @(...)
     {
         size_t pos = 0;
         while ((pos = s.find("@(", pos)) != string::npos) {
@@ -147,13 +154,14 @@ static bool wildValue(const string& va, LType ty, long long idx, string& out, st
             pos = close;
         }
     }
+    // 2) 递增占位 '*' (可有多个)
     {
         size_t p = s.find('*');
         while (p != string::npos) {
             double step = 1.0, start = 1.0;
             size_t wend = p + 1;
             int width = 0;
-            if (wend < s.size() && s[wend] == '*') {
+            if (wend < s.size() && s[wend] == '*') {            // '**<step>[@<start>]'
                 size_t q = wend + 1;
                 double st;
                 if (q < s.size() && (isdigit((unsigned char)s[q]) || s[q] == '+' || s[q] == '-' || s[q] == '.')) {
@@ -164,7 +172,7 @@ static bool wildValue(const string& va, LType ty, long long idx, string& out, st
                     if (parseNum(s, r, s2)) { start = s2; q = r; }
                 }
                 wend = q;
-            } else if (wend < s.size() && isdigit((unsigned char)s[wend])) {
+            } else if (wend < s.size() && isdigit((unsigned char)s[wend])) {  // '*<w>' 补零宽度
                 size_t r = wend;
                 while (r < s.size() && isdigit((unsigned char)s[r])) r++;
                 width = atoi(s.substr(wend, r - wend).c_str());
@@ -180,9 +188,11 @@ static bool wildValue(const string& va, LType ty, long long idx, string& out, st
     out = s;
     return any;
 }
+// 是否含批量通配符('*' 或 '@(')
 static bool hasWild(const string& v) {
     return v.find('*') != string::npos || v.find("@(") != string::npos;
 }
+// 校验通配符使用场景: 含通配符时必须处于批量(>1 项)场景; bool 类型不支持通配
 static bool validWildUse(const string& ty, const string& va, long long batch, const char* where) {
     if (!hasWild(va)) return true;
     if (tparse(ty) == LType::BOOL) {
@@ -195,8 +205,10 @@ static bool validWildUse(const string& ty, const string& va, long long batch, co
     }
     return true;
 }
+// CLI 中标签常写成 "-name" 这类带前导 '-' 的形式, 真实标签名不含 '-'。
 static string stripDash(string s) { while (!s.empty() && s[0] == '-') s.erase(0, 1); return s; }
 
+// 引号感知分词: "..." 内的空格与 ':' 属于一个 token, \" 表示转义引号。
 static vector<string> tokenize(const string& s) {
     vector<string> out;
     size_t i = 0, n = s.size();
@@ -247,26 +259,18 @@ static Item parseItem(const string& line) {
     return it;
 }
 
-static string formatItem(const Item& it) {
-    string line = "-id " + it.id;
-    if (!it.mainLabel.empty() && it.labels.count(it.mainLabel)) {
-        const Label& l = it.labels.at(it.mainLabel);
-        line += " -main_label:" + it.mainLabel + ":" + tname(l.type) + ":" + quote(l.value);
-    }
-    for (auto& kv : it.labels) {
-        if (kv.first == it.mainLabel) continue;
-        line += " -" + kv.first + ":" + tname(kv.second.type) + ":" + quote(kv.second.value);
-    }
-    return line;
-}
+
 
 // ===================== 存储层 =====================
+// v1: 逐行文本(旧格式)。 v2: 紧凑二进制(标签名字典去重 + 数值二进制化 + varint)。
+// 写入总是 v2 并原子替换; 读取自动检测 v1/v2。
 static long long toLL(const string& s);
 static double   toD (const string& s);
 static bool     toB (const string& s);
 static const unsigned char MAGIC[4] = { 'I', 'L', 'D', 'B' };
 static const unsigned char FMT_VERSION = 2;
 
+// LEB128 无符号 varint
 static void putUv(std::ostream& os, unsigned long long v) {
     while (v >= 0x80) { os.put((char)((v & 0x7f) | 0x80)); v >>= 7; }
     os.put((char)v);
@@ -284,55 +288,97 @@ static unsigned long long getUv(std::istream& is) {
     return v;
 }
 static void putZig(std::ostream& os, long long n) { putUv(os, (unsigned long long)((n << 1) ^ (n >> 63))); }
-static long long getZig(std::istream& is) { unsigned long long u = getUv(is); return (long long)((u >> 1) ^ -(long long)(u & 1)); }
 
 static void putString(std::ostream& os, const string& s) { putUv(os, s.size()); os.write(s.data(), (streamsize)s.size()); }
-static string getString(std::istream& is) {
-    unsigned long long len = getUv(is);
-    if (len > (1u << 28)) return "";
+// 严格读取 varint: 失败(含 EOF/畸形)返回 false, 用于完整性校验
+static bool getUvStrict(std::istream& is, unsigned long long& out) {
+    unsigned long long v = 0; int shift = 0;
+    while (true) {
+        int b = is.get();
+        if (b < 0) return false;
+        v |= (unsigned long long)(b & 0x7f) << shift;
+        if (!(b & 0x80)) break;
+        shift += 7;
+        if (shift > 70) return false;
+    }
+    out = v; return true;
+}
+// 严格读取字符串: 长度字段或内容不足则返回 false(不静默截断)
+static bool readStr(std::istream& is, string& out) {
+    unsigned long long len;
+    if (!getUvStrict(is, len)) return false;
+    if (len > (1u << 28)) return false;
     string s((size_t)len, '\0');
-    if (len) is.read(&s[0], (streamsize)len);
-    return s;
+    if (len && is.read(&s[0], (streamsize)len).gcount() != (streamsize)len) return false;
+    out.swap(s); return true;
 }
 
 struct LoadResult { vector<Item> items; string error; bool isV2 = false; };
 
 static vector<Item> readV2(std::istream& f, string& err) {
     vector<Item> items;
-    unsigned char ver, flags; char rs[2];
-    f.read((char*)&ver, 1); f.read((char*)&flags, 1); f.read(rs, 2);
-    unsigned long long dc = getUv(f);
+    unsigned char ver = 0, flags = 0; char rs[2] = { 0, 0 };
+    if (f.read((char*)&ver, 1).gcount() != 1 ||
+        f.read((char*)&flags, 1).gcount() != 1 ||
+        f.read(rs, 2).gcount() != 2) {
+        err = "文件头不完整"; return items;
+    }
+    unsigned long long dc;
+    if (!getUvStrict(f, dc)) { err = "缺少标签字典计数"; return items; }
     if (dc > (1u << 20)) { err = "标签字典过大"; return items; }
     vector<string> dict((size_t)dc);
-    for (auto& d : dict) d = getString(f);
+    for (auto& d : dict) {
+        string s;
+        if (!readStr(f, s)) { err = "标签字典内容损坏/截断"; return items; }
+        d.swap(s);
+    }
     while (true) {
         char id[10];
         f.read(id, 10);
-        if (f.gcount() < 10) break;
+        std::streamsize n = f.gcount();
+        if (n < 10) { if (f.eof() && n == 0) break; else { err = "记录意外截断"; break; } }
         Item it; it.id.assign(id, 10);
-        unsigned long long lc = getUv(f);
+        unsigned long long lc;
+        if (!getUvStrict(f, lc)) { err = "记录标签数缺失"; break; }
         if (lc > (1u << 16)) { err = "标签数异常"; break; }
-        unsigned long long mainIdx = getUv(f);
+        unsigned long long mainIdx;
+        if (!getUvStrict(f, mainIdx)) { err = "主标签索引缺失"; break; }
         bool bad = false;
         for (unsigned long long k = 0; k < lc; k++) {
-            unsigned long long ni = getUv(f);
+            unsigned long long ni;
+            if (!getUvStrict(f, ni)) { bad = true; break; }
             int t = f.get();
             if (t < 0) { bad = true; break; }
             string name = (ni < dict.size()) ? dict[(size_t)ni] : ("?idx" + to_string(ni));
             Label lb; lb.type = (LType)(t & 3);
-            if (lb.type == LType::CHAR) lb.value = getString(f);
-            else if (lb.type == LType::INT) lb.value = to_string(getZig(f));
+            if (lb.type == LType::CHAR) {
+                if (!readStr(f, lb.value)) { bad = true; break; }
+            }
+            else if (lb.type == LType::INT) {
+                unsigned long long u;
+                if (!getUvStrict(f, u)) { bad = true; break; }
+                long long z = (long long)((u >> 1) ^ -(long long)(u & 1));
+                lb.value = to_string(z);
+            }
             else if (lb.type == LType::FLOAT) {
-                double d = 0; f.read((char*)&d, 8);
-                if (f.gcount() < 8) { bad = true; break; }
+                double d = 0;
+                if (f.read((char*)&d, 8).gcount() < 8) { bad = true; break; }
                 char b[40]; snprintf(b, sizeof(b), "%.17g", d); lb.value = b;
             }
-            else { int bb = f.get(); lb.value = (bb == 1) ? "true" : "false"; }
+            else {
+                int bb = f.get();
+                if (bb < 0) { bad = true; break; }
+                lb.value = (bb == 1) ? "true" : "false";
+            }
             it.labels[name] = lb;
         }
-        if (bad) { err = "记录损坏"; break; }
+        if (bad) { err = "记录损坏/截断"; break; }
         if (mainIdx < dict.size() && it.labels.count(dict[(size_t)mainIdx])) it.mainLabel = dict[(size_t)mainIdx];
         items.push_back(it);
+    }
+    if (err.empty()) {
+        char c;
+        if (f.get(c)) err = "文件尾部存在残余数据";
     }
     return items;
 }
@@ -381,7 +427,7 @@ static LoadResult readFile(const string& path) {
         f.close();
         ifstream tf(path);
         string line;
-        getline(tf, line);
+        getline(tf, line); // v1 header
         while (getline(tf, line)) { if (line.empty()) continue; r.items.push_back(parseItem(line)); }
     }
     return r;
@@ -397,6 +443,7 @@ static wstring utf8ToWide(const string& s) {
 }
 #endif
 
+// 原子替换: 写临时文件后整体替换, 避免写入中断损坏库文件
 static void atomicReplace(const string& tmp, const string& dst) {
 #ifdef _WIN32
     if (!MoveFileExW(utf8ToWide(tmp).c_str(), utf8ToWide(dst).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
@@ -404,18 +451,29 @@ static void atomicReplace(const string& tmp, const string& dst) {
         MoveFileW(utf8ToWide(tmp).c_str(), utf8ToWide(dst).c_str());
     }
 #else
-    std::remove(dst.c_str());
+    // POSIX 下 rename 对已存在目标本就是原子的覆盖, 无需先 remove
     std::rename(tmp.c_str(), dst.c_str());
 #endif
 }
 
+static void fsyncFile(const string& path) {
+#ifdef _WIN32
+    HANDLE h = CreateFileW(utf8ToWide(path).c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_WRITE_THROUGH, NULL);
+    if (h != INVALID_HANDLE_VALUE) { FlushFileBuffers(h); CloseHandle(h); }
+#else
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd >= 0) { ::fsync(fd); ::close(fd); }
+#endif
+}
 static void writeFile(const string& path, const vector<Item>& items) {
     string tmp = path + ".tmp";
     {
         ofstream f(tmp, ios::binary);
         if (f) { writeV2(f, items); f.flush(); }
     }
+    fsyncFile(tmp);          // 数据落盘后再原子替换, 断电/崩溃不丢
     atomicReplace(tmp, path);
+    fsyncFile(path);         // 目录/文件元数据落盘(尽力而为)
 }
 
 static uintmax_t fileSize(const string& p) {
@@ -439,6 +497,7 @@ static long long toLL(const string& s) { try { return stoll(s); } catch (...) { 
 static double   toD (const string& s) { try { return stod (s); } catch (...) { return 0; } }
 static bool     toB  (const string& s) { string t = s; for (auto& c : t) c = tolower((unsigned char)c); return t == "true" || t == "1" || t == "yes"; }
 
+// '*' 匹配任意字符序列, '?' 匹配单个字符
 static bool wildcardMatch(const string& text, const string& pat) {
     size_t ti = 0, pi = 0, star = string::npos, mt = 0;
     while (ti < text.size()) {
@@ -509,6 +568,7 @@ static bool condMatch(const Item& it, const Cond& c) {
     return a <= b;
 }
 
+// 按值搜索: 任意标签的值匹配给定值(按各标签类型比较, char 支持 * ? 通配)
 static bool anyValueMatch(const Item& it, const string& v) {
     for (auto& kv : it.labels) {
         const Label& l = kv.second;
@@ -530,10 +590,12 @@ static void printItem(const Item& it, ostream& os = cout) {
     os << "\n";
 }
 
+// 过滤: filters 为空或含 "*" 表示全部; 否则每项必须同时满足全部条件。
+// 条件可为纯标签名(存在性) 或 "标签=值 / 标签>=值" 等值条件。
 static bool matchFilters(const Item& it, const vector<string>& filters) {
     if (filters.empty()) return true;
-    for (auto& f : filters) if (f == "*") return true;
     for (auto& f : filters) {
+        if (f == "*") continue;   // '*' 恒真: 只作一项, 不短路其余条件(避免混合过滤误删全部)
         Cond c = parseCond(stripDash(f));
         if (c.hasValue) { if (!condMatch(it, c)) return false; }
         else { if (!it.labels.count(c.label)) return false; }
@@ -573,15 +635,16 @@ static void help() {
 }
 
 struct Op {
-    string kind;
+    string kind;                 // new / add / del / set / rm / search / list / count / show
     string name, type, value, id, mainLabel;
     int cnt = 1;
     vector<string> filters;
-    vector<pair<string, string>> query;
+    vector<pair<string, string>> query;   // (connector, term)
 };
 
 int main(int argc, char** argv) {
 #ifdef _WIN32
+    // 让控制台按 UTF-8 解析输出, 避免中文在 GBK 终端下乱码
     SetConsoleOutputCP(CP_UTF8);
 #endif
     if (argc < 3) { help(); return 0; }
@@ -617,6 +680,7 @@ int main(int argc, char** argv) {
             string conn = (t == "--search") ? "" : (t == "--and" ? "and" : "or");
             string term;
             if (i + 1 < a.size() && a[i + 1] == "-v") {
+                // 按值搜索: 匹配任意标签的值等于给定值(支持 * ? 通配)
                 term = "@v:" + a[i + 2];
                 i += 2;
             } else {
@@ -647,6 +711,7 @@ int main(int argc, char** argv) {
         else { cerr << "未知参数: " << t << "\n"; help(); return 1; }
     }
 
+    // 收集新建项所需的标签 / 主标签 / 数量(整条命令只处理一批新建)
     vector<tuple<string, string, string>> newLabels;
     string newMain; int cnt = 1;
     for (auto& o : ops) {
@@ -731,7 +796,6 @@ int main(int argc, char** argv) {
             cout << "已更新 " << o.id << " 的标签 " << o.name << "\n";
         }
         else if (o.kind == "rm") {
-            // 修复: --delete "*"(删除全部)是合法操作; 仅完全未提供过滤标签时才报错
             if (o.filters.empty()) {
                 cerr << "错误: --delete 需要明确的过滤标签(或用 * 删除全部)\n"; return 1;
             }
@@ -743,6 +807,7 @@ int main(int argc, char** argv) {
             cout << "已删除 " << (before - items.size()) << " 个项\n";
         }
         else if (o.kind == "search") {
+            // 从左到右按 --and / --or 结合整个查询
             auto itemMatch = [&](const Item& it) {
                 bool acc = false, first = true;
                 for (auto& q : o.query) {
@@ -769,6 +834,7 @@ int main(int argc, char** argv) {
             cout << items.size() << "\n";
         }
         else if (o.kind == "get") {
+            // -g "标签": 输出所有含该标签项的该标签值, 多个值以换行隔开(纯文本)
             vector<string> vals;
             for (auto& it : items) {
                 auto f = it.labels.find(o.name);
@@ -795,6 +861,7 @@ int main(int argc, char** argv) {
         }
         else if (o.kind == "vacuum") {
             uintmax_t before = fileSize(path);
+            // 强制以 v2 紧凑格式原子重写, 回收空间并升级旧库
             if (!items.empty() || lr.isV2) {
                 writeFile(path, items);
                 cout << "vacuum: " << before << " 字节 -> " << fileSize(path) << " 字节 ("

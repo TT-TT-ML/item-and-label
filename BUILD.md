@@ -64,3 +64,10 @@ cd dbcomposer
 qmake dbcomposer.pro && mingw32-make -j4
 windeployqt --dir <输出目录> release/db_composer.exe
 ```
+
+## 企业级存储
+
+- **v2 紧凑二进制**：标签名字典去重 + 数值二进制化（int varint/zigzag、float 8 字节、bool 1 字节），实测 200 项重复标签库 19.4KB → 5.5KB（-71%）。
+- **原子写入**：先写临时文件、`fsync` 落盘后再整体原子替换——Windows `MoveFileEx(REPLACE_EXISTING)`，POSIX `rename`（本就是原子的覆盖）。进程中断 / 断电不损坏。
+- **向后兼容**：自动读 v1 文本旧库，`--vacuum` 一键升级 v2。
+- **严格校验**：`--check` 校验最小文件头、字典条数与内容、每条记录（类型字节、int/float 定长、char 长度）及尾部残余；截断 / 头部缺失 / 字典损坏 / 尾随垃圾均正确报「损坏」。
