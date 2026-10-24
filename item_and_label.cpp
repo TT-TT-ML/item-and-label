@@ -2,17 +2,17 @@
 // 编译: g++ -O2 -std=c++17 item_and_label.cpp -o db.exe
 //
 // 用法概览:
-//   db.exe <数据库文件.mdb> --new_item --label_add "-name" -v --char "xiaoming" --main_label "-name"
-//   db.exe <数据库文件.mdb> --new_item --label_add "-name" -v --char "p" --main_label "-name" --cnt 50
-//   db.exe <数据库文件.mdb> --new_item --label_add "-name" -v --char "*_a" --main_label "-name" --cnt 10  (值 1_a..10_a)
-//   db.exe <数据库文件.mdb> --new_item --label_add "-score" -v --float "**0.5" --main_label "-name" --cnt 4   (值 1 1.5 2 2.5)
-//   db.exe <数据库文件.mdb> --label_add "-age" -v --int "*" "*"   (给全部项加 age=1,2,3...)
-//   db.exe <数据库文件.mdb> --new_item --label_add "-color" -v --char "@(red,green,blue)" --main_label "-name" --cnt 6
-//   db.exe <数据库文件.mdb> --label_add "-age" -v --int "0" "*"
-//   db.exe <数据库文件.mdb> --label_add "-tag" -v --char "a" "-name" "-age"
-//   db.exe <数据库文件.mdb> --label_del "-age" "*"
-//   db.exe <数据库文件.mdb> --search "-name" --and "age>=18" --or "active=true"
-//   db.exe <数据库文件.mdb> --list / --count / --show <id> / --delete <标签...|*> / --set <id> <标签> -v <类型> <值>
+//   db.exe <数据库文件.ildb> --new_item --label_add "-name" -v --char "xiaoming" --main_label "-name"
+//   db.exe <数据库文件.ildb> --new_item --label_add "-name" -v --char "p" --main_label "-name" --cnt 50
+//   db.exe <数据库文件.ildb> --new_item --label_add "-name" -v --char "*_a" --main_label "-name" --cnt 10  (值 1_a..10_a)
+//   db.exe <数据库文件.ildb> --new_item --label_add "-score" -v --float "**0.5" --main_label "-name" --cnt 4   (值 1 1.5 2 2.5)
+//   db.exe <数据库文件.ildb> --label_add "-age" -v --int "*" "*"   (给全部项加 age=1,2,3...)
+//   db.exe <数据库文件.ildb> --new_item --label_add "-color" -v --char "@(red,green,blue)" --main_label "-name" --cnt 6
+//   db.exe <数据库文件.ildb> --label_add "-age" -v --int "0" "*"
+//   db.exe <数据库文件.ildb> --label_add "-tag" -v --char "a" "-name" "-age"
+//   db.exe <数据库文件.ildb> --label_del "-age" "*"
+//   db.exe <数据库文件.ildb> --search "-name" --and "age>=18" --or "active=true"
+//   db.exe <数据库文件.ildb> --list / --count / --show <id> / --delete <标签...|*> / --set <id> <标签> -v <类型> <值>
 //
 // 存储格式(每项一行, 值统一双引号包裹, 引号内反斜杠转义):
 //   ItemAndLabel DB v1
@@ -121,6 +121,12 @@ static string fmtNum(double v, LType ty, int width) {
 }
 
 // 批量值通配符展开(值模板可含多个占位符), idx 从 1 开始。返回 true 表示模板含通配符并已展开。
+//   '*'           递增序号(从 1, 步长 1),        "*_a" x10 → 1_a 2_a ... 10_a
+//   '**<step>'    递增, 步长 <step>(可小数),    "**0.5" x4 → 1 1.5 2 2.5
+//   '**<step>@<s>'递增, 步长 step、从 s 开始,   "**2@10" x4 → 10 12 14 16
+//   '*<w>'        序号补零到 <w> 位,            "*04" x5 → 0001 0002 ... 0005
+//   '@(a,b,c,...)'枚举遍历, 按序号轮流取值,     "@(红,绿,蓝)" x4 → 红 绿 蓝 红
+//   多个占位符可组合, 如 "@(A,B)-*04"
 static bool wildValue(const string& va, LType ty, long long idx, string& out, string& err) {
     err.clear();
     string s = va;
@@ -274,18 +280,6 @@ static const unsigned char FMT_VERSION = 2;
 static void putUv(std::ostream& os, unsigned long long v) {
     while (v >= 0x80) { os.put((char)((v & 0x7f) | 0x80)); v >>= 7; }
     os.put((char)v);
-}
-static unsigned long long getUv(std::istream& is) {
-    unsigned long long v = 0; int shift = 0;
-    while (true) {
-        unsigned char b = 0;
-        if (!is.get((char&)b)) break;
-        v |= (unsigned long long)(b & 0x7f) << shift;
-        if (!(b & 0x80)) break;
-        shift += 7;
-        if (shift > 70) break;
-    }
-    return v;
 }
 static void putZig(std::ostream& os, long long n) { putUv(os, (unsigned long long)((n << 1) ^ (n >> 63))); }
 
@@ -607,19 +601,19 @@ static void help() {
     cout <<
         "ItemAndLabel 特殊数据库工具\n"
         "\n"
-        "db.exe <数据库.mdb> --new_item --label_add \"-标签\" -v --类型 \"值\" --main_label \"-标签\" [--cnt N]\n"
+        "db.exe <数据库.ildb> --new_item --label_add \"-标签\" -v --类型 \"值\" --main_label \"-标签\" [--cnt N]\n"
         "    创建新项(必须设置 main_label)。--cnt N 批量创建 N 项, 每项独立 10 位唯一 id。\n"
         "    类型: --char / --int / --float / --bool。\n"
-        "db.exe <数据库.mdb> --label_add \"-标签\" -v --类型 \"值\" [过滤标签... | *]\n"
+        "db.exe <数据库.ildb> --label_add \"-标签\" -v --类型 \"值\" [过滤标签... | *]\n"
         "    给满足过滤(同时含这些标签)的项加标签, * 表示全部项。\n"
-        "db.exe <数据库.mdb> --label_del \"-标签\" [过滤标签... | *]\n"
+        "db.exe <数据库.ildb> --label_del \"-标签\" [过滤标签... | *]\n"
         "    从满足过滤的项删除标签, * 表示全部项。\n"
-        "db.exe <数据库.mdb> --search \"条件\" [--and \"条件\" | --or \"条件\"]...\n"
+        "db.exe <数据库.ildb> --search \"条件\" [--and \"条件\" | --or \"条件\"]...\n"
         "    条件: 标签名 / 标签=值 / 标签>=值 等(值支持 * ? 通配)。从左到右结合。\n"
         "    --search -v \"值\" 表示按任意标签的值搜索(也支持 * ? 通配)。\n"
-        "db.exe <数据库.mdb> --list | --count | --show <id> | --delete [标签...|*] | --set <id> <标签> -v --类型 \"值\"\n"
-        "db.exe <数据库.mdb> -g \"标签\"  输出含该标签所有项的值, 多个值以换行隔开(纯文本)。\n"
-        "db.exe <数据库.mdb> --stats | --vacuum | --check | --backup <目标>\n"
+        "db.exe <数据库.ildb> --list | --count | --show <id> | --delete [标签...|*] | --set <id> <标签> -v --类型 \"值\"\n"
+        "db.exe <数据库.ildb> -g \"标签\"  输出含该标签所有项的值, 多个值以换行隔开(纯文本)。\n"
+        "db.exe <数据库.ildb> --stats | --vacuum | --check | --backup <目标>\n"
         "    --stats 数据库统计(大小/项数/标签去重)。 --vacuum 压缩重写为紧凑格式。\n"
         "    --check 完整性校验。 --backup <目标> 复制备份。\n"
         "\n"
