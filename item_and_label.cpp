@@ -459,7 +459,65 @@ static void fsyncFile(const string& path) {
     if (fd >= 0) { ::fsync(fd); ::close(fd); }
 #endif
 }
+static void copyFile(const string& src, const string& dst);
+
+static bool fileExists(const string& p) {
+    ifstream f(p, ios::binary);
+    return (bool)f;
+}
+
+// 进程级文件锁: 通过伴随的 <db>.lock 文件实现多进程互斥。
+// 写命令独占锁, 只读命令共享锁; 阻塞等待而非失败, 保证"读-改-写"整段不被打断。
+class FileLock {
+    string lk;
+#ifdef _WIN32
+    HANDLE h = INVALID_HANDLE_VALUE;
+#else
+    int fd = -1;
+#endif
+public:
+    FileLock(const string& path, bool exclusive) {
+        lk = path + ".lock";
+#ifdef _WIN32
+        h = CreateFileW(utf8ToWide(lk).c_str(), GENERIC_READ | GENERIC_WRITE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            OVERLAPPED ov; ZeroMemory(&ov, sizeof(ov));
+            LockFileEx(h, exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0, 0, 1, 0, &ov); // 阻塞等待
+        }
+#else
+        fd = ::open(lk.c_str(), O_RDWR | O_CREAT, 0644);
+        if (fd >= 0) {
+            struct flock fl; memset(&fl, 0, sizeof fl);
+            fl.l_type = exclusive ? F_WRLCK : F_RDLCK;
+            fl.l_whence = SEEK_SET; fl.l_start = 0; fl.l_len = 0;  // 0 = 整个文件
+            ::fcntl(fd, F_SETLKW, &fl);   // 阻塞等待(记录锁, POSIX 通用)
+        }
+#endif
+    }
+    ~FileLock() {
+#ifdef _WIN32
+        if (h != INVALID_HANDLE_VALUE) { OVERLAPPED ov; ZeroMemory(&ov, sizeof(ov)); UnlockFileEx(h, 0, 1, 0, &ov); CloseHandle(h); }
+#else
+        if (fd >= 0) {
+            struct flock fl; memset(&fl, 0, sizeof fl);
+            fl.l_type = F_UNLCK; fl.l_whence = SEEK_SET; fl.l_start = 0; fl.l_len = 0;
+            ::fcntl(fd, F_SETLK, &fl);
+            ::close(fd);
+        }
+#endif
+    }
+};
+
+// 写前快照 + 原子写: 每次写入前把当前库整体备份到 <db>.bak(崩溃/误操作后可 --restore 回滚),
+// 再做原子替换。快照 fsync 落盘, 保证恢复点一致。
 static void writeFile(const string& path, const vector<Item>& items) {
+    if (fileExists(path)) {
+        string bak = path + ".bak";
+        copyFile(path, bak);
+        fsyncFile(bak);
+    }
     string tmp = path + ".tmp";
     {
         ofstream f(tmp, ios::binary);
@@ -478,6 +536,181 @@ static void copyFile(const string& src, const string& dst) {
     ifstream in(src, ios::binary);
     ofstream out(dst, ios::binary);
     if (in && out) out << in.rdbuf();
+}
+
+// ===================== JSON 导出 / 导入 =====================
+// 轻量 JSON 序列化 + 解析(仅覆盖本工具所需子集: 对象/数组/字符串/数字/bool/null)。
+// 结构: {"db":"ItemAndLabel","version":1,"items":[{id, main, labels:{名:{type,value}}}}]
+static void jsonStr(std::ostream& os, const string& s) {
+    os.put('"');
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  os << "\\\""; break;
+            case '\\': os << "\\\\"; break;
+            case '\n': os << "\\n"; break;
+            case '\r': os << "\\r"; break;
+            case '\t': os << "\\t"; break;
+            case '\b': os << "\\b"; break;
+            case '\f': os << "\\f"; break;
+            default:
+                if (c < 0x20) { char buf[8]; snprintf(buf, sizeof buf, "\\u%04x", (unsigned)c); os << buf; }
+                else os.put((char)c);
+        }
+    }
+    os.put('"');
+}
+static void itemsToJson(const vector<Item>& items, std::ostream& os) {
+    os << "{\"db\":\"ItemAndLabel\",\"version\":1,\"items\":[";
+    for (size_t i = 0; i < items.size(); i++) {
+        const Item& it = items[i];
+        if (i) os << ",";
+        os << "{\"id\":"; jsonStr(os, it.id);
+        os << ",\"main\":"; jsonStr(os, it.mainLabel);
+        os << ",\"labels\":{";
+        size_t k = 0;
+        for (auto& kv : it.labels) {
+            if (k++) os << ",";
+            jsonStr(os, kv.first);
+            os << ":{\"type\":"; jsonStr(os, tname(kv.second.type));
+            os << ",\"value\":"; jsonStr(os, kv.second.value); os << "}";
+        }
+        os << "}}";
+    }
+    os << "]}\n";
+}
+
+// 递归下降 JSON 解析器
+struct JVal {
+    enum T { NUL, BOOL, NUM, STR, ARR, OBJ } t = NUL;
+    bool b = false; double num = 0; string str;
+    vector<JVal> arr; map<string, JVal> obj;
+};
+class JParse {
+    const string& s; size_t p = 0;
+public:
+    bool ok = true; string err;
+    JParse(const string& src) : s(src) {}
+    JVal parse() { skip(); JVal v = val(); skip(); if (ok && p != s.size()) fail("JSON 尾部多余数据"); return v; }
+    void skip() { while (p < s.size() && isspace((unsigned char)s[p])) p++; }
+    bool fail(const string& e) { err = e; ok = false; return false; }
+    string str() {
+        p++; string r;
+        while (p < s.size()) {
+            char c = s[p];
+            if (c == '"') { p++; return r; }
+            if (c == '\\') {
+                p++; if (p >= s.size()) break;
+                char e = s[p++];
+                switch (e) {
+                    case '"': r += '"'; break; case '\\': r += '\\'; break; case '/': r += '/'; break;
+                    case 'b': r += '\b'; break; case 'f': r += '\f'; break; case 'n': r += '\n'; break;
+                    case 'r': r += '\r'; break; case 't': r += '\t'; break;
+                    case 'u': {
+                        unsigned code = 0; int n2 = 0;
+                        while (p < s.size() && n2 < 4) {
+                            char h = s[p]; code <<= 4;
+                            if (h >= '0' && h <= '9') code |= (unsigned)(h - '0');
+                            else if (h >= 'a' && h <= 'f') code |= (unsigned)(h - 'a' + 10);
+                            else if (h >= 'A' && h <= 'F') code |= (unsigned)(h - 'A' + 10);
+                            else { code = 0; break; }
+                            p++; n2++;
+                        }
+                        if (code >= 0xD800 && code <= 0xDBFF && p + 1 < s.size() && s[p] == '\\' && s[p + 1] == 'u') {
+                            unsigned lo = 0; size_t q = p + 2; int m2 = 0;
+                            while (q < s.size() && m2 < 4) {
+                                char h = s[q]; lo <<= 4;
+                                if (h >= '0' && h <= '9') lo |= (unsigned)(h - '0');
+                                else if (h >= 'a' && h <= 'f') lo |= (unsigned)(h - 'a' + 10);
+                                else if (h >= 'A' && h <= 'F') lo |= (unsigned)(h - 'A' + 10);
+                                else { lo = 0; break; }
+                                q++; m2++;
+                            }
+                            if (lo >= 0xDC00 && lo <= 0xDFFF) { code = 0x10000 + ((code - 0xD800) << 10) + (lo - 0xDC00); p = q; }
+                        }
+                        if (code < 0x80) r += (char)code;
+                        else if (code < 0x800) { r += (char)(0xC0 | (code >> 6)); r += (char)(0x80 | (code & 0x3F)); }
+                        else if (code < 0x10000) { r += (char)(0xE0 | (code >> 12)); r += (char)(0x80 | ((code >> 6) & 0x3F)); r += (char)(0x80 | (code & 0x3F)); }
+                        else { r += (char)(0xF0 | (code >> 18)); r += (char)(0x80 | ((code >> 12) & 0x3F)); r += (char)(0x80 | ((code >> 6) & 0x3F)); r += (char)(0x80 | (code & 0x3F)); }
+                    } break;
+                    default: r += e;
+                }
+            } else { r += c; p++; }
+        }
+        return r;
+    }
+    JVal val() {
+        JVal v; if (p >= s.size()) { fail("JSON 意外结束"); return v; }
+        char c = s[p];
+        if (c == '{') { v.t = JVal::OBJ; p++; skip();
+            if (p < s.size() && s[p] == '}') { p++; return v; }
+            while (p < s.size()) {
+                if (s[p] != '"') { fail("对象键需为字符串"); break; }
+                string key = str(); skip();
+                if (p < s.size() && s[p] == ':') { p++; skip(); }
+                JVal sv = val(); if (!ok) break; v.obj[key] = sv; skip();
+                if (p < s.size() && s[p] == ',') { p++; skip(); continue; }
+                if (p < s.size() && s[p] == '}') { p++; return v; }
+                fail("对象缺少 }"); break;
+            } return v;
+        }
+        if (c == '[') { v.t = JVal::ARR; p++; skip();
+            if (p < s.size() && s[p] == ']') { p++; return v; }
+            while (p < s.size()) {
+                JVal ev = val(); if (!ok) break; v.arr.push_back(ev); skip();
+                if (p < s.size() && s[p] == ',') { p++; skip(); continue; }
+                if (p < s.size() && s[p] == ']') { p++; return v; }
+                fail("数组缺少 ]"); break;
+            } return v;
+        }
+        if (c == '"') { v.t = JVal::STR; v.str = str(); return v; }
+        if (c == 't' && s.compare(p, 4, "true") == 0) { v.t = JVal::BOOL; v.b = true; p += 4; return v; }
+        if (c == 'f' && s.compare(p, 5, "false") == 0) { v.t = JVal::BOOL; v.b = false; p += 5; return v; }
+        if (c == 'n' && s.compare(p, 4, "null") == 0) { v.t = JVal::NUL; p += 4; return v; }
+        if (c == '-' || c == '+' || isdigit((unsigned char)c) || c == '.') {
+            v.t = JVal::NUM;
+            size_t st = p; if (c == '-' || c == '+') p++;
+            while (p < s.size() && (isdigit((unsigned char)s[p]) || s[p] == '.' || s[p] == 'e' || s[p] == 'E' || s[p] == '-' || s[p] == '+')) p++;
+            v.num = atof(s.substr(st, p - st).c_str()); return v;
+        }
+        fail("JSON 非法字符"); return v;
+    }
+};
+
+// 解析 JSON 文本为 items; 出错返回 false 并置 err
+static bool jsonToItems(const string& src, vector<Item>& out, string& err) {
+    JParse jp(src); JVal root = jp.parse();
+    if (!jp.ok) { err = jp.err; return false; }
+    if (root.t != JVal::OBJ) { err = "JSON 根必须是对象"; return false; }
+    auto it = root.obj.find("items");
+    if (it == root.obj.end() || it->second.t != JVal::ARR) { err = "缺少 items 数组"; return false; }
+    for (auto& ev : it->second.arr) {
+        if (ev.t != JVal::OBJ) { err = "items 元素必须是对象"; return false; }
+        Item itm;
+        auto f = ev.obj.find("id");
+        if (f != ev.obj.end() && f->second.t == JVal::STR) itm.id = f->second.str;
+        auto mf = ev.obj.find("main");
+        if (mf != ev.obj.end() && mf->second.t == JVal::STR) itm.mainLabel = mf->second.str;
+        auto lf = ev.obj.find("labels");
+        if (lf != ev.obj.end() && lf->second.t == JVal::OBJ) {
+            for (auto& lk : lf->second.obj) {
+                string nm = lk.first;
+                if (!validName(nm)) { err = "非法标签名: " + nm; return false; }
+                if (lk.second.t != JVal::OBJ) { err = "标签 " + nm + " 需为对象"; return false; }
+                Label lb;
+                auto tf = lk.second.obj.find("type");
+                if (tf != lk.second.obj.end() && tf->second.t == JVal::STR) lb.type = tparse(tf->second.str);
+                auto vf = lk.second.obj.find("value");
+                if (vf != lk.second.obj.end()) {
+                    if (vf->second.t == JVal::STR) lb.value = vf->second.str;
+                    else if (vf->second.t == JVal::NUM) { char b[40]; snprintf(b, sizeof b, "%.17g", vf->second.num); lb.value = b; }
+                    else if (vf->second.t == JVal::BOOL) lb.value = vf->second.b ? "true" : "false";
+                }
+                itm.labels[nm] = lb;
+            }
+        }
+        out.push_back(itm);
+    }
+    return true;
 }
 
 static string genId(mt19937& rng) {
@@ -616,6 +849,11 @@ static void help() {
         "db.exe <数据库.ildb> --stats | --vacuum | --check | --backup <目标>\n"
         "    --stats 数据库统计(大小/项数/标签去重)。 --vacuum 压缩重写为紧凑格式。\n"
         "    --check 完整性校验。 --backup <目标> 复制备份。\n"
+        "db.exe <数据库.ildb> --export <目标.json>         导出全部项为 JSON(数据交换)。\n"
+        "db.exe <数据库.ildb> --import <来源.json> [--replace]  从 JSON 导入(按 id 合并; --replace 先清空)。\n"
+        "db.exe <数据库.ildb> --restore                    从自动快照 <库>.bak 回滚上次写入前状态。\n"
+        "    每次写入前会自动保留上一版到 <库>.bak(崩溃/误操作可回滚)。\n"
+        "    .lock 伴随文件提供进程级文件锁: 写命令独占, 只读命令共享, 多进程读写互斥。\n"
         "\n"
         "标签名仅支持数字、英文和 '_';  '*' 为通配符。\n"
         "批量值通配符(--cnt > 1 创建或批量加标签时, 值可含):\n"
@@ -629,9 +867,10 @@ static void help() {
 }
 
 struct Op {
-    string kind;                 // new / add / del / set / rm / search / list / count / show
+    string kind;                 // new / add / del / set / rm / search / list / count / show / get / stats / vacuum / check / backup / export / import / restore
     string name, type, value, id, mainLabel;
     int cnt = 1;
+    bool replace = false;
     vector<string> filters;
     vector<pair<string, string>> query;   // (connector, term)
 };
@@ -690,6 +929,10 @@ int main(int argc, char** argv) {
         else if (t == "--vacuum") { Op o; o.kind = "vacuum"; ops.push_back(o); }
         else if (t == "--check") { Op o; o.kind = "check"; ops.push_back(o); }
         else if (t == "--backup") { Op o; o.kind = "backup"; o.name = a[++i]; ops.push_back(o); }
+        else if (t == "--export") { Op o; o.kind = "export"; o.name = a[++i]; ops.push_back(o); }
+        else if (t == "--import") { Op o; o.kind = "import"; o.name = a[++i]; ops.push_back(o); }
+        else if (t == "--replace") { for (auto& o2 : ops) if (o2.kind == "import") o2.replace = true; }
+        else if (t == "--restore") { Op o; o.kind = "restore"; ops.push_back(o); }
         else if (t == "--show") { Op o; o.kind = "show"; o.id = a[++i]; ops.push_back(o); }
         else if (t == "--delete") {
             Op o; o.kind = "rm";
@@ -713,6 +956,15 @@ int main(int argc, char** argv) {
         else if (o.kind == "mainlabel") newMain = o.name;
         else if (o.kind == "cnt") cnt = o.cnt;
     }
+
+    // 判断是否含写操作: 是则加独占锁, 否则共享锁(多进程并发安全)
+    bool wantWrite = false;
+    for (auto& o : ops) {
+        if (o.kind == "new" || o.kind == "add" || o.kind == "del" || o.kind == "set" ||
+            o.kind == "rm" || o.kind == "vacuum" || o.kind == "import" || o.kind == "restore")
+            wantWrite = true;
+    }
+    FileLock fl(path, wantWrite);   // 整个进程持有锁, 析构时释放
 
     LoadResult lr = readFile(path);
     vector<Item> items = lr.items;
@@ -874,6 +1126,41 @@ int main(int argc, char** argv) {
         else if (o.kind == "backup") {
             copyFile(path, o.name);
             cout << "已备份到 " << o.name << " (" << fileSize(o.name) << " 字节)\n";
+        }
+        else if (o.kind == "export") {
+            ofstream f(o.name, ios::binary);
+            if (!f) { cerr << "错误: 无法写入 " << o.name << "\n"; return 1; }
+            itemsToJson(items, f);
+            cout << "已导出 " << items.size() << " 个项到 " << o.name << "\n";
+        }
+        else if (o.kind == "import") {
+            string content;
+            { ifstream f(o.name, ios::binary);
+              if (!f) { cerr << "错误: 无法读取 " << o.name << "\n"; return 1; }
+              stringstream ss; ss << f.rdbuf(); content = ss.str(); }
+            vector<Item> in; string err;
+            if (!jsonToItems(content, in, err)) { cerr << "错误: 导入失败: " << err << "\n"; return 1; }
+            if (o.replace) { items.clear(); ids.clear(); }
+            int added = 0, upd = 0;
+            for (auto& it : in) {
+                if (!it.id.empty() && ids.count(it.id)) {
+                    for (size_t i = 0; i < items.size(); i++) if (items[i].id == it.id) { items[i] = it; upd++; break; }
+                } else {
+                    if (it.id.empty()) { string nid; do { nid = genId(rng); } while (ids.count(nid)); it.id = nid; }
+                    ids.insert(it.id); items.push_back(it); added++;
+                }
+            }
+            modified = true;
+            cout << "已导入: 新增 " << added << ", 更新 " << upd << " (共 " << in.size() << " 条)\n";
+        }
+        else if (o.kind == "restore") {
+            string bak = path + ".bak";
+            if (!fileExists(bak)) { cerr << "错误: 没有可用快照 " << bak << "\n"; return 1; }
+            string tmp = path + ".tmp2";
+            copyFile(bak, tmp); fsyncFile(tmp); atomicReplace(tmp, path); fsyncFile(path);
+            cout << "已从快照恢复: " << bak << " -> " << path << "\n";
+            lr = readFile(path); items = lr.items;   // 刷新内存态, 便于后续命令组合
+            ids.clear(); for (auto& it : items) ids.insert(it.id);
         }
     }
 
