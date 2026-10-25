@@ -94,18 +94,36 @@ db.exe "x.ildb" --set <id> "-age" -v --int "30"
 
 ## 企业级存储
 
-> 定位：**单用户工具**。无文件锁，避免多个进程同时写同一个库（读-改-写非并发安全），否则可能互相覆盖。
-
+- **并发安全**：伴随文件 `<库>.lock` 提供进程级文件锁——写命令独占、只读命令共享（Windows `LockFileEx`，POSIX `fcntl` 记录锁，阻塞等待），多进程同时读、以及读写之间互斥，避免"读-改-写"互相踩踏。锁粒度是整库（整个命令），非记录级。
 - **v2 紧凑二进制（`ILDB` 魔数）**：标签名字典去重 + 数值二进制化，实测 19.4KB → 5.5KB（-71%）。
-- **原子写入**：先写临时文件、`fsync` 落盘后再整体原子替换（Windows `MoveFileEx`，POSIX `rename`），进程中断 / 断电不损坏。
+- **原子写入 + 写前快照**：先写临时文件、`fsync` 落盘后整体原子替换（Windows `MoveFileEx`，POSIX `rename`）；每次写入前自动把当前库备份到 `<库>.bak`。进程中断 / 断电不损坏。
+- **崩溃回滚**：误操作（如 `--delete *`）或上次写入异常时，`--restore` 从 `<库>.bak` 快照回滚到上一次写入前的一致状态。
 - **完整性**：`--check` 严格校验文件头、字典、每条记录及尾部残余，截断/损坏文件正确报错。
 - **向后兼容**：自动读 v1 文本旧库，`--vacuum` 一键升级。
 
 ```
-db.exe "x.ildb" --stats     # 大小 / 项数 / 标签去重
-db.exe "x.ildb" --vacuum    # 压缩重写为紧凑格式
-db.exe "x.ildb" --check     # 完整性校验
+db.exe "x.ildb" --stats              # 大小 / 项数 / 标签去重
+db.exe "x.ildb" --vacuum             # 压缩重写为紧凑格式
+db.exe "x.ildb" --check              # 完整性校验
 db.exe "x.ildb" --backup "backup.ildb"
+db.exe "x.ildb" --restore            # 从快照 <库>.bak 回滚
+```
+
+## JSON 导入导出（数据交换）
+
+`--export` 把全部项输出为可读 JSON，便于查看 / 对接外部系统 / 脚本处理；`--import` 读回并按 id 合并（已存在 id 的项被更新，新 id 追加），`--replace` 先清空库再导入。中文与转义字符、四种类型值均完整保留。
+
+```
+db.exe "x.ildb" --export "x.json"
+db.exe "x.ildb" --import "x.json"            # 合并
+db.exe "x.ildb" --import "x.json" --replace  # 清空后导入
+```
+
+导出结构示例：
+```json
+{"db":"ItemAndLabel","version":1,"items":[
+  {"id":"9aBcDeFgHi","main":"name","labels":{"name":{"type":"char","value":"xiaoming"},"age":{"type":"int","value":"30"}}}
+]}
 ```
 
 ## 多平台

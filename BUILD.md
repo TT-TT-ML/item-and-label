@@ -4,14 +4,14 @@
 
 - 源码：`item_and_label.cpp`（UTF-8 编码，带 BOM）
 - 已编译产物：
-  - `db.exe`                —— Windows x64
-  - `db32.exe`              —— Windows x86 / 32 位
-  - `db-arm64.exe`          —— Windows on ARM64
-  - `db-android-arm64`      —— Android 64 位 ARM（AArch64，NDK，静态链接 libc++ 并 strip）
-  - `db-android-arm32`      —— Android 32 位 ARM（NDK）
-  - `db-android-x86_64`     —— Android x86_64（NDK）
-  - `db-android-x86`        —— Android x86 / 32 位（NDK）
-  - `db-android-riscv64`    —— Android RISC-V 64 位（NDK）
+  - `db.exe`                —— Windows x64（MinGW-w64 g++ 编译）
+  - `db32.exe`              —— Windows x86 / 32 位（llvm-mingw 交叉编译）
+  - `db-arm64.exe`          —— Windows on ARM64（llvm-mingw 交叉编译）
+  - `db-android-arm64`      —— Android 64 位 ARM（AArch64，NDK 交叉编译）
+  - `db-android-arm32`      —— Android 32 位 ARM（NDK 交叉编译）
+  - `db-android-x86_64`     —— Android x86_64（NDK 交叉编译）
+  - `db-android-x86`        —— Android x86 / 32 位（NDK 交叉编译）
+  - `db-android-riscv64`    —— Android RISC-V 64 位（NDK 交叉编译）
   - `ItemAndLabel.apk`      —— Android 图形界面版（手搓 APK）
 
 ---
@@ -46,17 +46,17 @@ aarch64-w64-mingw32-g++.exe -O2 -std=c++17 item_and_label.cpp -o db-arm64.exe
 
 ## Android
 
-使用 Android NDK 的 clang 交叉编译器。**静态链接 libc++ 并 strip（`-static-libstdc++ -s`），产物不依赖 libc++_shared.so**。本机 NDK 位于 `F:\SDKs\ndk\<版本>\toolchains\llvm\prebuilt\windows-x86_64\bin`：
+使用 Android NDK 的 clang 交叉编译器，把源码直接编成安卓原生命令行可执行文件（ELF，不打包 APK）。本机 NDK 位于 `F:\SDKs\ndk\<版本>\toolchains\llvm\prebuilt\windows-x86_64\bin`，wrapper 命名形如 `aarch64-linux-android21-clang++.cmd`（`21` = 最低 Android 7.0 API 21）：
 
 ```
-aarch64-linux-android21-clang++.cmd -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-arm64
-armv7a-linux-androideabi21-clang++.cmd -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-arm32
-x86_64-linux-android21-clang++.cmd   -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-x86_64
-i686-linux-android21-clang++.cmd     -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-x86
-riscv64-linux-android35-clang++.cmd  -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-riscv64
+aarch64-linux-android21-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-arm64
+armv7a-linux-androideabi21-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-arm32
+x86_64-linux-android21-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-x86_64
+i686-linux-android21-clang++.cmd   -O2 -std=c++17 item_and_label.cpp -o db-android-x86
+riscv64-linux-android35-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-riscv64
 ```
 
-部署到设备（需 adb，设备需开启 USB 调试）：
+部署到设备（需 adb，设备需开启 USB 调试，可直接运行或 root）：
 ```
 adb push db-android-arm64 /data/local/tmp/db
 adb shell chmod 755 /data/local/tmp/db
@@ -65,7 +65,7 @@ adb shell /data/local/tmp/db /sdcard/test.ildb --help
 
 ### APK（安卓图形界面版）
 
-手搓 APK：用 Android SDK + JDK，把 native 程序内置进一个极简安卓应用（输入框敲命令 → 按钮执行 → 下方显示输出）。源码在 `apk/`，产物 `ItemAndLabel.apk`。
+手搓 APK：用 Android SDK（本机 `F:\SDKs`，build-tools 36 + platforms android-36 + NDK）+ JDK，把 native 程序内置进一个极简安卓应用（输入框敲命令 → 按钮执行 → 下方显示输出）。源码在 `apk/`，产物 `ItemAndLabel.apk`。
 
 构建命令（顺序执行，工程位于 `apk/`）：
 ```
@@ -77,7 +77,7 @@ zipalign -f 4 build\unsigned.apk build\aligned.apk
 apksigner sign --ks %USERPROFILE%\.android\debug.keystore --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android --out ItemAndLabel.apk build\aligned.apk
 ```
 
-说明：`apk/assets/db/{arm64-v8a,armeabi-v7a,x86_64}/db` 是三个 ABI 的 native 二进制（已静态链接，无需随 APK 携带 libc++_shared.so），运行时按设备 ABI 自动解压到应用私有目录并 `chmod 755`。数据库默认 `/sdcard/Android/data/com.itemlabel.db/files/data.ildb`（界面可改）。安装：
+说明：`apk/assets/db/{arm64-v8a,armeabi-v7a,x86_64}/db` 是三个 ABI 的 native 二进制，运行时按设备 ABI 自动解压到应用私有目录并 `chmod 755`。数据库默认 `/sdcard/Android/data/com.itemlabel.db/files/data.ildb`（界面可改）。安装：
 ```
 adb install ItemAndLabel.apk
 ```
@@ -86,13 +86,18 @@ adb install ItemAndLabel.apk
 
 ## Linux（x64 / ARM64 / ARM）
 
-> 本机（Windows）没有 Linux 工具链（无 WSL、无 Linux 交叉编译器），**无法直接产出 Linux 二进制**。请把源码拷到目标 Linux 机器上编译（装 `g++` 即可，无需额外依赖）：
+> 本机（Windows）没有 Linux 工具链（无 WSL、无 Linux 交叉编译器、Qt 也无 linux 套件），**无法直接产出 Linux 二进制**。请把源码拷到目标 Linux 机器上编译（装 `g++` 即可，无需额外依赖）：
 
 ```
 g++ -O2 -std=c++17 -o db item_and_label.cpp
 ```
 
-适用于 x86_64 服务器、Raspberry Pi、以及 S905X3 等 ARM 开发板（Armbian 等系统同样执行以上命令）。Windows 侧若装好 Linux 交叉工具链后可交叉编译。
+适用于 x86_64 服务器、Raspberry Pi、以及 S905X3 等 ARM 开发板（Armbian 等系统同样执行以上命令）。Windows 侧若装好 Linux 交叉工具链后可交叉编译：
+
+```
+x86_64-linux-gnu-g++  -O2 -std=c++17 -o db-linux      item_and_label.cpp
+aarch64-linux-gnu-g++ -O2 -std=c++17 -o db-linux-arm64 item_and_label.cpp
+```
 
 ---
 
@@ -139,6 +144,9 @@ db <数据库.ildb> --stats                                            # 统计(
 db <数据库.ildb> --vacuum                                          # 压缩重写为紧凑格式(回收空间)
 db <数据库.ildb> --check                                           # 完整性校验
 db <数据库.ildb> --backup <目标.ildb>                                 # 原子复制备份
+db <数据库.ildb> --export <目标.json>                                 # 导出全部项为 JSON
+db <数据库.ildb> --import <来源.json> [--replace]                       # 从 JSON 导入(按 id 合并; --replace 清空)
+db <数据库.ildb> --restore                                          # 从自动快照 <库>.bak 回滚
 ```
 
 标签名仅支持数字、英文、`_`；`*`/`?` 为通配符；类型：`--char` / `--int` / `--float` / `--bool`。
@@ -169,10 +177,10 @@ db <数据库.ildb> --backup <目标.ildb>                                 # 原
 
 ### 企业级存储
 
-> 定位：**单用户工具**。无文件锁，避免多个进程同时写同一个库（读-改-写非并发安全），否则可能互相覆盖。
-
+- **并发安全**：伴随文件 `<库>.lock` 提供进程级文件锁——写命令独占、只读命令共享（Windows `LockFileEx`，POSIX `fcntl` 记录锁，阻塞等待），多进程同时读、以及读写之间互斥，避免"读-改-写"互相踩踏。**注意：锁粒度是整库（整个命令），非记录级；同一库仍建议由单一调度者执行写操作。**
 - **v2 紧凑二进制**：标签名全局字典去重 + 数值二进制化（int 用 varint/zigzag、float 用 8 字节、bool 1 字节），大幅压缩文件。实测 200 项重复标签库 19.4KB → 5.5KB（-71%）。
-- **原子写入**：所有写操作先写临时文件、`fsync` 落盘后，再整体原子替换——Windows 用 `MoveFileEx(REPLACE_EXISTING)`，POSIX 用 `rename`（对已存在目标本就是原子的覆盖，无需先删除）。进程中断 / 断电不会损坏 `.ildb`。
+- **原子写入 + 写前快照**：每次写入先把当前库整体备份到 `<库>.bak`（fsync 落盘），再写临时文件、fsync 后整体原子替换——Windows 用 `MoveFileEx(REPLACE_EXISTING)`，POSIX 用 `rename`。进程中断 / 断电不会损坏 `.ildb`；若误操作（如 `--delete *`）或上次写入异常，`--restore` 可从快照回滚到上一次写入前的一致状态。
+- **JSON 导入导出**：`--export` 输出可读 JSON（数据交换 / 对接外部系统），`--import` 读回（按 id 合并，`--replace` 先清空），值与标签名、类型完整保留。
 - **向后兼容**：自动识别并读取旧的 v1 文本格式库，`--vacuum` 一次性升级为 v2 紧凑格式。
 - **完整性**：`--check` 做严格解析校验——最小文件头、标签字典条数与内容、每条记录（类型字节、int/float 定长、char 长度）全部完整，且无尾部残余字节；截断、头部缺失、字典损坏、尾随垃圾均正确报「损坏」而非误报 OK。
 
