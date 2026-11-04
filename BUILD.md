@@ -49,11 +49,11 @@ aarch64-w64-mingw32-g++.exe -O2 -std=c++17 item_and_label.cpp -o db-arm64.exe
 使用 Android NDK 的 clang 交叉编译器，把源码直接编成安卓原生命令行可执行文件（ELF，不打包 APK）。本机 NDK 位于 `F:\SDKs\ndk\<版本>\toolchains\llvm\prebuilt\windows-x86_64\bin`，wrapper 命名形如 `aarch64-linux-android21-clang++.cmd`（`21` = 最低 Android 7.0 API 21）：
 
 ```
-aarch64-linux-android21-clang++.cmd -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-arm64
-armv7a-linux-androideabi21-clang++.cmd -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-arm32
-x86_64-linux-android21-clang++.cmd -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-x86_64
-i686-linux-android21-clang++.cmd   -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-x86
-riscv64-linux-android35-clang++.cmd -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-riscv64
+aarch64-linux-android21-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-arm64
+armv7a-linux-androideabi21-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-arm32
+x86_64-linux-android21-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-x86_64
+i686-linux-android21-clang++.cmd   -O2 -std=c++17 item_and_label.cpp -o db-android-x86
+riscv64-linux-android35-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-riscv64
 ```
 
 部署到设备（需 adb，设备需开启 USB 调试，可直接运行或 root）：
@@ -134,7 +134,7 @@ xcrun --sdk iphoneos clang++ -O2 -std=c++17 -arch arm64 item_and_label.cpp -o db
 
 ```
 db <数据库.ildb> --new_item --label_add "-name" -v --char "xiaoming" --main_label "-name" [--cnt N]
-db <数据库.ildb> --label_add "-age" -v --int "0" "*"                    # 给满足过滤的项加标签,*=全部
+db <数据库.ildb> --label_add "-age" -v "--int" "0" "*"                    # 给满足过滤的项加标签,*=全部
 db <数据库.ildb> --label_del "-age" "*"                                 # 删除标签
 db <数据库.ildb> --search "-name" --and "level>=1" --or "active=true"   # 搜索
 db <数据库.ildb> --search -v "xiaoming"                                 # 按任意标签的值搜索
