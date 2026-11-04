@@ -74,7 +74,11 @@ db.exe "x.ildb" --list
 db.exe "x.ildb" --count
 db.exe "x.ildb" --show <id>
 db.exe "x.ildb" -g "name"   # 输出所有 name 标签的值, 每行一个(纯文本)
+db.exe "x.ildb" -g "age" --main "xiaoming"          # 只输出主标签值=xiaoming 的项的 age 值
+db.exe "x.ildb" -g "age" --main "user*"             # 主标签值支持 * ? 通配
 ```
+
+`--main` 按每项的主标签（`main_label`）的值做筛选，命中的项才输出所查标签的值；结果仍是纯值、每行一个，便于管道/脚本处理。不带 `--main` 时与原来的 `-g` 完全一致。
 
 ### 6. 删除项 / 修改
 
