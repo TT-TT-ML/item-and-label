@@ -845,7 +845,10 @@ static void help() {
         "    条件: 标签名 / 标签=值 / 标签>=值 等(值支持 * ? 通配)。从左到右结合。\n"
         "    --search -v \"值\" 表示按任意标签的值搜索(也支持 * ? 通配)。\n"
         "db.exe <数据库.ildb> --list | --count | --show <id> | --delete [标签...|*] | --set <id> <标签> -v --类型 \"值\"\n"
-        "db.exe <数据库.ildb> -g \"标签\"  输出含该标签所有项的值, 多个值以换行隔开(纯文本)。\n"
+        "db.exe <数据库.ildb> -g \"标签\" [--main \"主标签值/通配\"]\n"
+        "    输出含该标签所有项的值, 多个值以换行隔开(纯文本)。\n"
+        "    带 --main 时先按主标签(main_label)的值筛选, 只输出主值匹配项的标签值,\n"
+        "    如 -g \"-age\" --main \"xiaoming\" ; 主值支持 * ? 通配, 如 --main \"user*\"。\n"
         "db.exe <数据库.ildb> --stats | --vacuum | --check | --backup <目标>\n"
         "    --stats 数据库统计(大小/项数/标签去重)。 --vacuum 压缩重写为紧凑格式。\n"
         "    --check 完整性校验。 --backup <目标> 复制备份。\n"
@@ -868,7 +871,7 @@ static void help() {
 
 struct Op {
     string kind;                 // new / add / del / set / rm / search / list / count / show / get / stats / vacuum / check / backup / export / import / restore
-    string name, type, value, id, mainLabel;
+    string name, type, value, id, mainLabel, mainFilter;
     int cnt = 1;
     bool replace = false;
     vector<string> filters;
@@ -889,9 +892,14 @@ int main(int argc, char** argv) {
     for (auto& t : a) if (t == "--new_item") { newItemMode = true; break; }
 
     vector<Op> ops;
+    string pendingMain;   // --main 的主标签值过滤, 供 -g 使用
     for (size_t i = 0; i < a.size(); i++) {
         string t = a[i];
-        if (t == "--new_item") { Op o; o.kind = "new"; ops.push_back(o); }
+        if (t == "--main") {
+            pendingMain = a[++i];
+            for (auto& o2 : ops) if (o2.kind == "get") o2.mainFilter = pendingMain;
+        }
+        else if (t == "--new_item") { Op o; o.kind = "new"; ops.push_back(o); }
         else if (t == "--cnt") {
             Op o; o.kind = "cnt"; o.cnt = (i + 1 < a.size()) ? (int)toLL(a[++i]) : 1; ops.push_back(o);
         }
@@ -924,7 +932,7 @@ int main(int argc, char** argv) {
         }
         else if (t == "--list") { Op o; o.kind = "list"; ops.push_back(o); }
         else if (t == "--count") { Op o; o.kind = "count"; ops.push_back(o); }
-        else if (t == "-g") { Op o; o.kind = "get"; o.name = stripDash(a[++i]); ops.push_back(o); }
+        else if (t == "-g") { Op o; o.kind = "get"; o.name = stripDash(a[++i]); o.mainFilter = pendingMain; ops.push_back(o); }
         else if (t == "--stats") { Op o; o.kind = "stats"; ops.push_back(o); }
         else if (t == "--vacuum") { Op o; o.kind = "vacuum"; ops.push_back(o); }
         else if (t == "--check") { Op o; o.kind = "check"; ops.push_back(o); }
@@ -1081,8 +1089,14 @@ int main(int argc, char** argv) {
         }
         else if (o.kind == "get") {
             // -g "标签": 输出所有含该标签项的该标签值, 多个值以换行隔开(纯文本)
+            // --main "值/通配": 先按主标签(main_label)的值筛选, 只取匹配项的标签值
+            if (!o.mainFilter.empty() && !validName(o.name)) { cerr << "错误: 非法标签名 " << o.name << "\n"; return 1; }
             vector<string> vals;
             for (auto& it : items) {
+                if (!o.mainFilter.empty()) {
+                    auto mf = it.labels.find(it.mainLabel);
+                    if (mf == it.labels.end() || !wildcardMatch(mf->second.value, o.mainFilter)) continue;
+                }
                 auto f = it.labels.find(o.name);
                 if (f != it.labels.end()) vals.push_back(f->second.value);
             }
