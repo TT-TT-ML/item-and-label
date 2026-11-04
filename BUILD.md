@@ -134,7 +134,7 @@ xcrun --sdk iphoneos clang++ -O2 -std=c++17 -arch arm64 item_and_label.cpp -o db
 
 ```
 db <数据库.ildb> --new_item --label_add "-name" -v --char "xiaoming" --main_label "-name" [--cnt N]
-db <数据库.ildb> --label_add "-age" -v "--int" "0" "*"                    # 给满足过滤的项加标签,*=全部
+db <数据库.ildb> --label_add "-age" -v --int "0" "*"                    # 给满足过滤的项加标签,*=全部
 db <数据库.ildb> --label_del "-age" "*"                                 # 删除标签
 db <数据库.ildb> --search "-name" --and "level>=1" --or "active=true"   # 搜索
 db <数据库.ildb> --search -v "xiaoming"                                 # 按任意标签的值搜索
