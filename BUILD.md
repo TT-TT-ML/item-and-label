@@ -2,7 +2,7 @@
 
 纯 C++17 单文件程序，仅依赖标准库（Windows 上额外调用 `SetConsoleOutputCP` 修复中文乱码，非 Windows 平台自动忽略该段代码）。
 
-- 源码：`item_and_label.cpp`（UTF-8 编码，带 BOM）
+- 源码：`item_and_label.cpp`（UTF-8 编码；仓库内版本无 BOM，MSVC 编译必须加 `/utf-8`，g++/clang++ 直接可用）
 - 已编译产物：
   - `db.exe`                —— Windows x64（MinGW-w64 g++ 编译）
   - `db32.exe`              —— Windows x86 / 32 位（llvm-mingw 交叉编译）
@@ -23,7 +23,7 @@
 ```
 vcvars64.bat && cl /nologo /O2 /std:c++17 /EHsc /utf-8 item_and_label.cpp /Fe:db.exe
 ```
-（MSVC 必须带 `/utf-8`，否则无 BOM 环境下的中文字符串会按 GBK 误解；本源码已带 BOM，双保险。）
+（MSVC 必须带 `/utf-8`，否则无 BOM 环境下的中文字符串会按 GBK 误解。）
 
 ### x86 / 32 位（MSVC）
 ```
@@ -49,11 +49,11 @@ aarch64-w64-mingw32-g++.exe -O2 -std=c++17 item_and_label.cpp -o db-arm64.exe
 使用 Android NDK 的 clang 交叉编译器，把源码直接编成安卓原生命令行可执行文件（ELF，不打包 APK）。本机 NDK 位于 `F:\SDKs\ndk\<版本>\toolchains\llvm\prebuilt\windows-x86_64\bin`，wrapper 命名形如 `aarch64-linux-android21-clang++.cmd`（`21` = 最低 Android 7.0 API 21）：
 
 ```
-aarch64-linux-android21-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-arm64
-armv7a-linux-androideabi21-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-arm32
-x86_64-linux-android21-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-x86_64
-i686-linux-android21-clang++.cmd   -O2 -std=c++17 item_and_label.cpp -o db-android-x86
-riscv64-linux-android35-clang++.cmd -O2 -std=c++17 item_and_label.cpp -o db-android-riscv64
+aarch64-linux-android21-clang++.cmd -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-arm64
+armv7a-linux-androideabi21-clang++.cmd -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-arm32
+x86_64-linux-android21-clang++.cmd -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-x86_64
+i686-linux-android21-clang++.cmd   -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-x86
+riscv64-linux-android35-clang++.cmd -O2 -std=c++17 -static-libstdc++ -s item_and_label.cpp -o db-android-riscv64
 ```
 
 部署到设备（需 adb，设备需开启 USB 调试，可直接运行或 root）：
