@@ -139,6 +139,7 @@ db <数据库.ildb> --label_del "-age" "*"                                 # 删
 db <数据库.ildb> --search "-name" --and "level>=1" --or "active=true"   # 搜索
 db <数据库.ildb> --search -v "xiaoming"                                 # 按任意标签的值搜索
 db <数据库.ildb> -g "-name"                                             # 输出该标签所有值,换行隔开
+db <数据库.ildb> -g "-age" --main "xiaoming"                            # 按主标签值取标签值(纯值,支持 * ?)
 db <数据库.ildb> --list | --count | --show <id> | --delete ... | --set <id> <标签> -v --类型 "值"
 db <数据库.ildb> --stats                                            # 统计(大小/项数/标签去重)
 db <数据库.ildb> --vacuum                                          # 压缩重写为紧凑格式(回收空间)
